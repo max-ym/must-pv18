@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::fmt::Display;
 use std::time::Duration;
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
+use strum_macros::{EnumIter, FromRepr};
 use tokio::time::{sleep};
 
 use log::*;
@@ -68,47 +68,99 @@ async fn main() -> Result<(), Error> {
     );
     channel.enable().await?;
 
-    async fn print<T: SerialRead + std::fmt::Debug>(reg: T, channel: &mut Channel) {
-        match reg.read(channel).await {
-            Ok(val) => println!("{val}"),
-            Err(e) => println!("{:?}: {}", reg, e),
+    for group in Groups16::new(Reg16::iter().map(|v| v as u16)) {
+        let result = read_many(group.clone(), &mut channel).await;
+        match result {
+            Ok(val) => {
+                for (index, val) in val.into_iter().enumerate() {
+                    let addr = group.start + index as u16;
+                    println!("{}", Reg16Val {
+                        val,
+                        var: Reg16::from_repr(addr).expect("range was created from valid values"),
+                    });
+                }
+            },
+            Err(e) => println!("Error reading {:?}: {}", group, e),
         }
     }
-
-    if output_csv {
-        for reg in Reg16::iter() {
-            print!("{reg:?},");
-        }
-        for reg in Reg32::iter() {
-            print!("{reg:?},");
-        }
-        println!();
-
-        loop {
-            for reg in Reg16::iter() {
-                print(reg, &mut channel).await;
-                print!(",");
-            }
-            for reg in Reg32::iter() {
-                print(reg, &mut channel).await;
-                print!(",");
-            }
-            println!();
-            sleep(Duration::from_secs(1)).await;
-        }
-    } else {
-        for reg in Reg16::iter() {
-            print(reg, &mut channel).await;
-        }
-        for reg in Reg32::iter() {
-            print(reg, &mut channel).await;
+    for group in Groups32::new(Reg32::iter().map(|v| v as u16)) {
+        let result = read_many(group.clone(), &mut channel).await;
+        match result {
+            Ok(val) => {
+                for (index, val) in val.chunks(2).enumerate() {
+                    let addr = group.start + index as u16 * 2;
+                    println!("{}", Reg32Val {
+                        val: [val[0], val[1]],
+                        var: Reg32::from_repr(addr).expect("range was created from valid values"),
+                    });
+                }
+            },
+            Err(e) => println!("Error reading {:?}: {}", group, e),
         }
     }
 
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, EnumIter)]
+struct Groups16<I: Iterator<Item = u16>> {
+    iter: I,
+}
+
+impl<I: Iterator<Item = u16>> Groups16<I> {
+    fn new(iter: I) -> Self {
+        Self {
+            iter
+        }
+    }
+}
+
+impl<I: Iterator<Item = u16>> Iterator for Groups16<I> {
+    type Item = std::ops::Range<u16>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.iter.next()?;
+        let mut end = start;
+        while let Some(next) = self.iter.next() {
+            if next == end + 1 {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        Some(start..end + 1)
+    }
+}
+
+struct Groups32<I: Iterator<Item = u16>> {
+    iter: I,
+}
+
+impl<I: Iterator<Item = u16>> Groups32<I> {
+    fn new(iter: I) -> Self {
+        Self {
+            iter
+        }
+    }
+}
+
+impl<I: Iterator<Item = u16>> Iterator for Groups32<I> {
+    type Item = std::ops::Range<u16>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.iter.next()?;
+        let mut end = start;
+        while let Some(next) = self.iter.next() {
+            if next == end + 2 {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        Some(start..end + 2)
+    }
+}
+
+#[derive(Debug, Clone, Copy, EnumIter, FromRepr)]
 #[repr(u16)]
 enum Reg16 {
     MachineType = 10001,
@@ -453,7 +505,7 @@ impl Display for Reg32Val {
     }
 }
 
-#[derive(Debug, Clone, Copy, EnumIter)]
+#[derive(Debug, Clone, Copy, EnumIter, FromRepr)]
 #[repr(u16)]
 enum Reg32 {
     AccumulatedPvPower = 15217,
@@ -509,6 +561,24 @@ impl SerialRead for Reg32 {
     }
 }
 
+async fn read_many(addr: std::ops::Range<u16>, channel: &mut Channel) -> Result<Vec<u16>, RequestError> {
+    let now = std::time::Instant::now();
+
+    let val = channel.read_holding_registers(RequestParam {
+        id: SLAVE,
+        response_timeout: TIMEOUT,
+    }, AddressRange {
+        start: addr.start,
+        count: addr.clone().count() as u16,
+    }).await.map(|v| v.iter().map(|v| v.value).collect())?;
+
+    let elapsed = now.elapsed();
+    debug!("Read {:?}: {} ms", addr, elapsed.as_millis());
+    sleep(AFTER_READ_HALT).await; // needed to prevent errors on too fast reads
+
+    Ok(val)
+}
+
 async fn ctx_read(addr: u16, channel: &mut Channel) -> Result<u16, RequestError> {
     let now = std::time::Instant::now();
 
@@ -525,4 +595,26 @@ async fn ctx_read(addr: u16, channel: &mut Channel) -> Result<u16, RequestError>
     sleep(AFTER_READ_HALT).await; // needed to prevent errors on too fast reads
 
     Ok(val)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Registers are required to be listed in sorted order, so that they can be loaded
+    /// in groups.
+    #[test]
+    fn reg_sorted() {
+        let mut last = 0;
+        for reg in Reg16::iter().map(|v| v as u16) {
+            assert!(reg > last);
+            last = reg;
+        }
+
+        let mut last = 0;
+        for reg in Reg32::iter().map(|v| v as u16) {
+            assert!(reg > last);
+            last = reg;
+        }
+    }
 }
