@@ -3,17 +3,15 @@ use std::fmt::Display;
 use std::time::Duration;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
-use tokio::time::{sleep, timeout};
-use tokio::time::error::Elapsed;
-use tokio_modbus::client::{rtu, Context};
-use tokio_modbus::Slave;
+use tokio::time::{sleep};
 
 use log::*;
-use tokio_serial::SerialPort;
+use rodbus::{AddressRange, DataBits, DecodeLevel, FlowControl, Parity, RequestError, RetryStrategy, SerialSettings, StopBits, UnitId};
+use rodbus::client::{Channel, RequestParam};
 
 const BAUD: u32 = 19200;
 const PATH: &str = "/dev/ttyUSB0";
-const SLAVE: Slave = Slave(4);
+const SLAVE: UnitId = UnitId { value: 4 };
 const TIMEOUT: Duration = Duration::from_millis(200);
 const AFTER_READ_HALT: Duration = Duration::from_millis((512.0 / BAUD as f32 * 1000.0) as u64);
 
@@ -35,17 +33,43 @@ async fn main() -> Result<(), Error> {
         .unwrap();
     debug!("AFTER_READ_HALT {} ms", AFTER_READ_HALT.as_millis());
 
-    use tokio_serial::SerialStream;
-
     let output_csv = std::env::args().skip(1).find(|v| v == "--csv").is_some();
 
-    let builder = tokio_serial::new(PATH, BAUD);
-    let mut stream = SerialStream::open(&builder)?;
-    stream.set_exclusive(true)?;
-    let mut ctx = rtu::attach_slave(stream, SLAVE);
+    struct MyRetryStrategy;
+    impl RetryStrategy for MyRetryStrategy {
+        fn reset(&mut self) {
+            debug!("RetryStrategy - Resetting connection");
+        }
 
-    async fn print<T: SerialRead + std::fmt::Debug>(reg: T, ctx: &mut Context) {
-        match reg.read(ctx).await {
+        fn after_failed_connect(&mut self) -> Duration {
+            debug!("RetryStrategy - Failed to connect");
+            TIMEOUT
+        }
+
+        fn after_disconnect(&mut self) -> Duration {
+            debug!("RetryStrategy - Disconnected");
+            TIMEOUT
+        }
+    }
+
+    let mut channel = rodbus::client::spawn_rtu_client_task(
+        PATH,
+        SerialSettings {
+            baud_rate: BAUD,
+            data_bits: DataBits::Eight,
+            flow_control: FlowControl::None,
+            stop_bits: StopBits::One,
+            parity: Parity::None,
+        },
+        1,
+        Box::new(MyRetryStrategy),
+        DecodeLevel::default(),
+        None
+    );
+    channel.enable().await?;
+
+    async fn print<T: SerialRead + std::fmt::Debug>(reg: T, channel: &mut Channel) {
+        match reg.read(channel).await {
             Ok(val) => println!("{val}"),
             Err(e) => println!("{:?}: {}", reg, e),
         }
@@ -62,11 +86,11 @@ async fn main() -> Result<(), Error> {
 
         loop {
             for reg in Reg16::iter() {
-                print(reg, &mut ctx).await;
+                print(reg, &mut channel).await;
                 print!(",");
             }
             for reg in Reg32::iter() {
-                print(reg, &mut ctx).await;
+                print(reg, &mut channel).await;
                 print!(",");
             }
             println!();
@@ -74,10 +98,10 @@ async fn main() -> Result<(), Error> {
         }
     } else {
         for reg in Reg16::iter() {
-            print(reg, &mut ctx).await;
+            print(reg, &mut channel).await;
         }
         for reg in Reg32::iter() {
-            print(reg, &mut ctx).await;
+            print(reg, &mut channel).await;
         }
     }
 
@@ -451,16 +475,16 @@ type Error = Box<dyn std::error::Error>;
 trait SerialRead {
     type Item: Display;
 
-    async fn read(&self, ctx: &mut Context) -> Result<Self::Item, Error>;
+    async fn read(&self, channel: &mut Channel) -> Result<Self::Item, Error>;
 }
 
 #[async_trait]
 impl SerialRead for Reg16 {
     type Item = Reg16Val;
 
-    async fn read(&self, ctx: &mut Context) -> Result<Self::Item, Error> {
+    async fn read(&self, channel: &mut Channel) -> Result<Self::Item, Error> {
         let addr = *self as u16;
-        let val = ctx_read(addr, ctx).await??;
+        let val = ctx_read(addr, channel).await?;
 
         Ok(Reg16Val {
             val,
@@ -473,10 +497,10 @@ impl SerialRead for Reg16 {
 impl SerialRead for Reg32 {
     type Item = Reg32Val;
 
-    async fn read(&self, ctx: &mut Context) -> Result<Self::Item, Error> {
+    async fn read(&self, channel: &mut Channel) -> Result<Self::Item, Error> {
         let addr = *self as u16;
-        let val0 = ctx_read(addr + 0, ctx).await??;
-        let val1 = ctx_read(addr + 1, ctx).await??;
+        let val0 = ctx_read(addr + 0, channel).await?;
+        let val1 = ctx_read(addr + 1, channel).await?;
 
         Ok(Reg32Val {
             val: [val0, val1],
@@ -485,13 +509,16 @@ impl SerialRead for Reg32 {
     }
 }
 
-async fn ctx_read(addr: u16, ctx: &mut Context) -> Result<std::io::Result<u16>, Elapsed> {
-    use tokio_modbus::prelude::Reader;
-
+async fn ctx_read(addr: u16, channel: &mut Channel) -> Result<u16, RequestError> {
     let now = std::time::Instant::now();
 
-    let future = ctx.read_holding_registers(addr, 1);
-    let val = timeout(TIMEOUT, future).await?.map(|v| v[0]);
+    let val = channel.read_holding_registers(RequestParam {
+        id: SLAVE,
+        response_timeout: TIMEOUT,
+    }, AddressRange {
+        start: addr,
+        count: 1,
+    }).await.map(|v| v[0].value)?;
 
     let elapsed = now.elapsed();
     debug!("Read {}: {} ms", addr, elapsed.as_millis());
