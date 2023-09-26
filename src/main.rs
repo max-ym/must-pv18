@@ -3,11 +3,14 @@ use std::fmt::Display;
 use std::time::Duration;
 use strum::IntoEnumIterator;
 use strum_macros::{EnumIter, FromRepr};
-use tokio::time::{sleep};
+use tokio::time::sleep;
 
 use log::*;
-use rodbus::{AddressRange, DataBits, DecodeLevel, FlowControl, Parity, RequestError, RetryStrategy, SerialSettings, StopBits, UnitId};
 use rodbus::client::{Channel, RequestParam};
+use rodbus::{
+    AddressRange, DataBits, DecodeLevel, FlowControl, Parity, RequestError, RetryStrategy,
+    SerialSettings, StopBits, UnitId,
+};
 
 const BAUD: u32 = 19200;
 const PATH: &str = "/dev/ttyUSB0";
@@ -64,7 +67,7 @@ async fn main() -> Result<(), Error> {
         1,
         Box::new(MyRetryStrategy),
         DecodeLevel::default(),
-        None
+        None,
     );
     channel.enable().await?;
 
@@ -74,12 +77,16 @@ async fn main() -> Result<(), Error> {
             Ok(val) => {
                 for (index, val) in val.into_iter().enumerate() {
                     let addr = group.start + index as u16;
-                    println!("{}", Reg16Val {
-                        val,
-                        var: Reg16::from_repr(addr).expect("range was created from valid values"),
-                    });
+                    println!(
+                        "{}",
+                        Reg16Val {
+                            val,
+                            var: Reg16::from_repr(addr)
+                                .expect("range was created from valid values"),
+                        }
+                    );
                 }
-            },
+            }
             Err(e) => println!("Error reading {:?}: {}", group, e),
         }
     }
@@ -89,12 +96,16 @@ async fn main() -> Result<(), Error> {
             Ok(val) => {
                 for (index, val) in val.chunks(2).enumerate() {
                     let addr = group.start + index as u16 * 2;
-                    println!("{}", Reg32Val {
-                        val: [val[0], val[1]],
-                        var: Reg32::from_repr(addr).expect("range was created from valid values"),
-                    });
+                    println!(
+                        "{}",
+                        Reg32Val {
+                            val: [val[0], val[1]],
+                            var: Reg32::from_repr(addr)
+                                .expect("range was created from valid values"),
+                        }
+                    );
                 }
-            },
+            }
             Err(e) => println!("Error reading {:?}: {}", group, e),
         }
     }
@@ -108,9 +119,7 @@ struct Groups16<I: Iterator<Item = u16>> {
 
 impl<I: Iterator<Item = u16>> Groups16<I> {
     fn new(iter: I) -> Self {
-        Self {
-            iter
-        }
+        Self { iter }
     }
 }
 
@@ -137,9 +146,7 @@ struct Groups32<I: Iterator<Item = u16>> {
 
 impl<I: Iterator<Item = u16>> Groups32<I> {
     fn new(iter: I) -> Self {
-        Self {
-            iter
-        }
+        Self { iter }
     }
 }
 
@@ -538,10 +545,7 @@ impl SerialRead for Reg16 {
         let addr = *self as u16;
         let val = ctx_read(addr, channel).await?;
 
-        Ok(Reg16Val {
-            val,
-            var: *self,
-        })
+        Ok(Reg16Val { val, var: *self })
     }
 }
 
@@ -561,16 +565,25 @@ impl SerialRead for Reg32 {
     }
 }
 
-async fn read_many(addr: std::ops::Range<u16>, channel: &mut Channel) -> Result<Vec<u16>, RequestError> {
+async fn read_many(
+    addr: std::ops::Range<u16>,
+    channel: &mut Channel,
+) -> Result<Vec<u16>, RequestError> {
     let now = std::time::Instant::now();
 
-    let val = channel.read_holding_registers(RequestParam {
-        id: SLAVE,
-        response_timeout: TIMEOUT,
-    }, AddressRange {
-        start: addr.start,
-        count: addr.clone().count() as u16,
-    }).await.map(|v| v.iter().map(|v| v.value).collect())?;
+    let val = channel
+        .read_holding_registers(
+            RequestParam {
+                id: SLAVE,
+                response_timeout: TIMEOUT,
+            },
+            AddressRange {
+                start: addr.start,
+                count: addr.clone().count() as u16,
+            },
+        )
+        .await
+        .map(|v| v.iter().map(|v| v.value).collect())?;
 
     let elapsed = now.elapsed();
     debug!("Read {:?}: {} ms", addr, elapsed.as_millis());
@@ -582,13 +595,19 @@ async fn read_many(addr: std::ops::Range<u16>, channel: &mut Channel) -> Result<
 async fn ctx_read(addr: u16, channel: &mut Channel) -> Result<u16, RequestError> {
     let now = std::time::Instant::now();
 
-    let val = channel.read_holding_registers(RequestParam {
-        id: SLAVE,
-        response_timeout: TIMEOUT,
-    }, AddressRange {
-        start: addr,
-        count: 1,
-    }).await.map(|v| v[0].value)?;
+    let val = channel
+        .read_holding_registers(
+            RequestParam {
+                id: SLAVE,
+                response_timeout: TIMEOUT,
+            },
+            AddressRange {
+                start: addr,
+                count: 1,
+            },
+        )
+        .await
+        .map(|v| v[0].value)?;
 
     let elapsed = now.elapsed();
     debug!("Read {}: {} ms", addr, elapsed.as_millis());
