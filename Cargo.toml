@@ -1,0 +1,15 @@
+[package]
+name = "must-solar"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio-modbus = "0.8.2"
+tokio-serial = "5.4.4"
+strum = "0.25.0"
+strum_macros = "0.25.1"
+tokio = "1.29.1"
+async-trait = "0.1.72"
