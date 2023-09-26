@@ -36,7 +36,7 @@ async fn main() -> Result<(), Error> {
         .unwrap();
     debug!("AFTER_READ_HALT {} ms", AFTER_READ_HALT.as_millis());
 
-    let output_csv = std::env::args().skip(1).find(|v| v == "--csv").is_some();
+    // let output_csv = std::env::args().skip(1).find(|v| v == "--csv").is_some();
 
     struct MyRetryStrategy;
     impl RetryStrategy for MyRetryStrategy {
@@ -129,7 +129,7 @@ impl<I: Iterator<Item = u16>> Iterator for Groups16<I> {
     fn next(&mut self) -> Option<Self::Item> {
         let start = self.iter.next()?;
         let mut end = start;
-        while let Some(next) = self.iter.next() {
+        for next in self.iter.by_ref() {
             if next == end + 1 {
                 end = next;
             } else {
@@ -156,7 +156,7 @@ impl<I: Iterator<Item = u16>> Iterator for Groups32<I> {
     fn next(&mut self) -> Option<Self::Item> {
         let start = self.iter.next()?;
         let mut end = start;
-        while let Some(next) = self.iter.next() {
+        for next in self.iter.by_ref() {
             if next == end + 2 {
                 end = next;
             } else {
@@ -553,6 +553,7 @@ impl SerialRead for Reg16 {
 impl SerialRead for Reg32 {
     type Item = Reg32Val;
 
+    #[allow(clippy::identity_op)]
     async fn read(&self, channel: &mut Channel) -> Result<Self::Item, Error> {
         let addr = *self as u16;
         let val0 = ctx_read(addr + 0, channel).await?;
