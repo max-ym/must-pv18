@@ -27,7 +27,7 @@ async fn main() -> Result<(), Error> {
                 message
             ))
         })
-        .level(LevelFilter::Debug)
+        .level(LevelFilter::Info)
         .chain(std::io::stdout())
         .apply()
         .unwrap();
