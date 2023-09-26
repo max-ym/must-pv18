@@ -11,5 +11,9 @@ tokio-modbus = "0.8.2"
 tokio-serial = "5.4.4"
 strum = "0.25.0"
 strum_macros = "0.25.1"
-tokio = "1.29.1"
+tokio = { version = "1.29.1", features = ["time"] }
 async-trait = "0.1.72"
+
+log = "0.4.19"
+fern = "0.6.2"
+chrono = "0.4.26"

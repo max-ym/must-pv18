@@ -1,23 +1,48 @@
 use async_trait::async_trait;
 use std::fmt::Display;
+use std::time::Duration;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
+use tokio::time::{sleep, timeout};
+use tokio::time::error::Elapsed;
 use tokio_modbus::client::{rtu, Context};
 use tokio_modbus::Slave;
 
+use log::*;
+use tokio_serial::SerialPort;
+
+const BAUD: u32 = 19200;
+const PATH: &str = "/dev/ttyUSB0";
+const SLAVE: Slave = Slave(4);
+const TIMEOUT: Duration = Duration::from_millis(200);
+const AFTER_READ_HALT: Duration = Duration::from_millis((512.0 / BAUD as f32 * 1000.0) as u64);
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .level(LevelFilter::Debug)
+        .chain(std::io::stdout())
+        .apply()
+        .unwrap();
+    debug!("AFTER_READ_HALT {} ms", AFTER_READ_HALT.as_millis());
+
     use tokio_serial::SerialStream;
 
-    let output_csv = std::env::args().skip(1).find(|v| v == "csv").is_some();
+    let output_csv = std::env::args().skip(1).find(|v| v == "--csv").is_some();
 
-    let path = "/dev/ttyUSB0";
-    let baud = 19200;
-    let slave = Slave(4);
-
-    let builder = tokio_serial::new(path, baud);
-    let stream = SerialStream::open(&builder)?;
-    let mut ctx = rtu::attach_slave(stream, slave);
+    let builder = tokio_serial::new(PATH, BAUD);
+    let mut stream = SerialStream::open(&builder)?;
+    stream.set_exclusive(true)?;
+    let mut ctx = rtu::attach_slave(stream, SLAVE);
 
     async fn print<T: SerialRead + std::fmt::Debug>(reg: T, ctx: &mut Context) {
         match reg.read(ctx).await {
@@ -45,6 +70,7 @@ async fn main() -> Result<(), Error> {
                 print!(",");
             }
             println!();
+            sleep(Duration::from_secs(1)).await;
         }
     } else {
         for reg in Reg16::iter() {
@@ -433,12 +459,11 @@ impl SerialRead for Reg16 {
     type Item = Reg16Val;
 
     async fn read(&self, ctx: &mut Context) -> Result<Self::Item, Error> {
-        use tokio_modbus::prelude::Reader;
-
         let addr = *self as u16;
-        let val = ctx.read_holding_registers(addr, 1).await?;
+        let val = ctx_read(addr, ctx).await??;
+
         Ok(Reg16Val {
-            val: val[0],
+            val,
             var: *self,
         })
     }
@@ -449,15 +474,28 @@ impl SerialRead for Reg32 {
     type Item = Reg32Val;
 
     async fn read(&self, ctx: &mut Context) -> Result<Self::Item, Error> {
-        use tokio_modbus::prelude::Reader;
+        let addr = *self as u16;
+        let val0 = ctx_read(addr + 0, ctx).await??;
+        let val1 = ctx_read(addr + 1, ctx).await??;
 
-        let addr0 = *self as u16;
-        let addr1 = addr0 + 1;
-        let val0 = ctx.read_holding_registers(addr0, 1).await?;
-        let val1 = ctx.read_holding_registers(addr1, 1).await?;
         Ok(Reg32Val {
-            val: [val0[0], val1[0]],
+            val: [val0, val1],
             var: *self,
         })
     }
+}
+
+async fn ctx_read(addr: u16, ctx: &mut Context) -> Result<std::io::Result<u16>, Elapsed> {
+    use tokio_modbus::prelude::Reader;
+
+    let now = std::time::Instant::now();
+
+    let future = ctx.read_holding_registers(addr, 1);
+    let val = timeout(TIMEOUT, future).await?.map(|v| v[0]);
+
+    let elapsed = now.elapsed();
+    debug!("Read {}: {} ms", addr, elapsed.as_millis());
+    sleep(AFTER_READ_HALT).await; // needed to prevent errors on too fast reads
+
+    Ok(val)
 }
