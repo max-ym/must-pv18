@@ -36,8 +36,6 @@ async fn main() -> Result<(), Error> {
         .unwrap();
     debug!("AFTER_READ_HALT {} ms", AFTER_READ_HALT.as_millis());
 
-    // let output_csv = std::env::args().skip(1).find(|v| v == "--csv").is_some();
-
     struct MyRetryStrategy;
     impl RetryStrategy for MyRetryStrategy {
         fn reset(&mut self) {
@@ -70,6 +68,52 @@ async fn main() -> Result<(), Error> {
         None,
     );
     channel.enable().await?;
+
+    if std::env::args().find(|v| v == "--db").is_some() {
+        debug!("Making snapshot to store to DB");
+
+        let tls = native_tls::TlsConnector::builder()
+            .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("check the parameters above, those should pass!");
+        let tls = postgres_native_tls::MakeTlsConnector::new(tls);
+
+        let (cli, conn) = tokio_postgres::Config::new()
+            .user("must_solar")
+            .password("must_solar")
+            .host("localhost")
+            .port(5432)
+            .dbname("must_solar")
+            .connect_timeout(Duration::from_secs(5))
+            .connect(tls)
+            .await?;
+
+        // The connection object performs the actual communication with the database,
+        // so spawn it off to run on its own.
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                error!("connection error: {e}");
+            }
+        });
+
+        let pv_pow = Reg32::AccumulatedPvPower.read(&mut channel).await?;
+        info!("{pv_pow}");
+        let load_pow = Reg32::AccumulatedLoadPower.read(&mut channel).await?;
+        info!("{load_pow}");
+
+        let sql = format!(
+            "INSERT INTO accumulated_power (pv, load) VALUES ({}, {})",
+            pv_pow.val(), load_pow.val()
+        );
+        let count = cli.simple_query(&sql).await?.len();
+        if count == 1 {
+            debug!("Snapshot stored to DB");
+        } else {
+            warn!("Unexpected statement result: {count}");
+        }
+        return Ok(());
+    }
 
     for group in Groups16::new(Reg16::iter().map(|v| v as u16)).expect("Reg16 enum is not empty") {
         let result = read_many(group.clone(), &mut channel).await;
@@ -302,6 +346,12 @@ struct Reg32Val {
     var: Reg32,
 }
 
+impl Reg32Val {
+    fn val(&self) -> f32 {
+        f32::from(self.val[0]) * 1000.0 + f32::from(self.val[1]) * 0.1
+    }
+}
+
 #[derive(Debug)]
 enum ConnectionState {
     Disconnected,
@@ -513,7 +563,7 @@ impl Display for Reg16Val {
 impl Display for Reg32Val {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use Reg32::*;
-        let sum = f32::from(self.val[0]) * 1000.0 + f32::from(self.val[1]) * 0.1;
+        let sum = self.val();
 
         match self.var {
             AccumulatedPvPower => write!(f, "Accumulated PV Power: {} kWh", sum),
