@@ -70,7 +70,7 @@ async fn main() -> Result<(), Error> {
     channel.enable().await?;
 
     if std::env::args().any(|v| v == "db") {
-        snapshot_acc(&connect_db().await?, &mut channel).await?;
+        return snapshot_acc(&connect_db().await?, &mut channel).await;
     } else if std::env::args().any(|v| v == "load") {
         return snapshot_load(&connect_db().await?, &mut channel).await;
     } else if std::env::args().any(|v| v == "track") {
