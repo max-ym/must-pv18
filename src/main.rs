@@ -185,30 +185,34 @@ async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
 
     let regs_to_read = [
         Reg16::PvVoltage,
+        Reg16::PvBatteryVoltage,
         Reg16::PvChargerCurrent,
         Reg16::PvChargerPower,
-        Reg16::BatteryVoltage,
-        Reg16::BatteryCurrent,
-        Reg16::BatteryPower,
+
         Reg16::LoadCurrent,
         Reg16::PInverter,
         Reg16::SInverter,
+
+        Reg16::BatteryPower,
+        Reg16::BatteryCurrent,
     ];
     // Hardcode to make only two requests to controller to save time.
     let range1 = Reg16::PvVoltage as u16..(Reg16::PvChargerPower as u16 + 1);
-    let range2 = Reg16::BatteryVoltage as u16..(Reg16::SInverter as u16 + 1);
+    let range2 = Reg16::LoadCurrent as u16..(Reg16::SInverter as u16 + 1);
+    let range3 = Reg16::BatteryPower as u16..(Reg16::BatteryCurrent as u16 + 1);
+
+    let ranges = [&range1, &range2, &range3];
 
     // Check that we've made no mistake
-    assert_eq!(range1.len() + range2.len(), regs_to_read.len());
     for reg in regs_to_read {
-        assert!(range1.contains(&(reg as u16)) || range2.contains(&(reg as u16)));
+        assert!(ranges.iter().any(|r| r.contains(&(reg as u16))));
     }
 
-    let mut results = Vec::with_capacity(range1.len() + range2.len());
+    let mut results = Vec::with_capacity(ranges.iter().map(|r| r.len()).sum());
 
     debug!("reading regs");
-    for grp in [range1, range2] {
-        debug!("{:?}", &grp);
+    for grp in ranges {
+        debug!("{:?}", grp);
         let result = read_many(grp.clone(), channel).await;
         match result {
             Ok(val) => {
@@ -240,6 +244,13 @@ async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
                 .map(|v| v.val)
                 .unwrap()
         };
+        ($var:ident, ival) => {
+            results
+                .iter()
+                .find(|v| v.var == Reg16::$var)
+                .map(|v| v.val as i16)
+                .unwrap()
+        };
         ($var:ident, -ival) => {
             results
                 .iter()
@@ -255,11 +266,11 @@ async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
         find!(PvVoltage, f01),
         find!(PvChargerCurrent, f01),
         find!(PvChargerPower),
-        find!(BatteryVoltage, f01),
+        find!(PvBatteryVoltage, f01),
         find!(BatteryCurrent, -ival),
         find!(BatteryPower, -ival),
         find!(LoadCurrent, f01),
-        find!(PInverter),
+        find!(PInverter, ival),
         find!(SInverter),
     );
     debug!("{sql}");
@@ -638,7 +649,7 @@ impl Display for Reg16Val {
             InverterCurrent => write!(f, "Inverter Current: {} A", f01),
             GridCurrent => write!(f, "Grid Current: {} A", f01),
             LoadCurrent => write!(f, "Load Current: {} A", f01),
-            PInverter => write!(f, "P Inverter: {} W", self.val),
+            PInverter => write!(f, "P Inverter: {} W", ival),
             PGrid => write!(f, "P Grid: {} W", self.val),
             PLoad => write!(f, "P Load: {} W", self.val),
             LoadPercent => write!(f, "Load Percent: {} %", self.val),
