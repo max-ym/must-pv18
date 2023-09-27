@@ -83,7 +83,7 @@ async fn main() -> Result<(), Error> {
             }
 
             snapshot_load(&cli, &mut channel).await?;
-            sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_secs(2)).await;
         }
     }
 
