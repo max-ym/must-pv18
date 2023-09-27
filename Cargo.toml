@@ -1,5 +1,5 @@
 [package]
-name = "must-solar"
+name = "must-pv18"
 version = "0.1.0"
 edition = "2021"
 publish = false

@@ -71,7 +71,7 @@ async fn main() -> Result<(), Error> {
     );
     channel.enable().await?;
 
-    for group in Groups16::new(Reg16::iter().map(|v| v as u16)) {
+    for group in Groups16::new(Reg16::iter().map(|v| v as u16)).expect("Reg16 enum is not empty") {
         let result = read_many(group.clone(), &mut channel).await;
         match result {
             Ok(val) => {
@@ -90,7 +90,7 @@ async fn main() -> Result<(), Error> {
             Err(e) => println!("Error reading {:?}: {}", group, e),
         }
     }
-    for group in Groups32::new(Reg32::iter().map(|v| v as u16)) {
+    for group in Groups32::new(Reg32::iter().map(|v| v as u16)).expect("Reg32 enum is not empty") {
         let result = read_many(group.clone(), &mut channel).await;
         match result {
             Ok(val) => {
@@ -115,11 +115,13 @@ async fn main() -> Result<(), Error> {
 
 struct Groups16<I: Iterator<Item = u16>> {
     iter: I,
+    next_start: u16,
 }
 
 impl<I: Iterator<Item = u16>> Groups16<I> {
-    fn new(iter: I) -> Self {
-        Self { iter }
+    fn new(mut iter: I) -> Option<Self> {
+        let next_start = iter.next()?;
+        Some(Self { iter, next_start })
     }
 }
 
@@ -127,26 +129,35 @@ impl<I: Iterator<Item = u16>> Iterator for Groups16<I> {
     type Item = std::ops::Range<u16>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let start = self.iter.next()?;
+        let start = self.next_start;
         let mut end = start;
+
         for next in self.iter.by_ref() {
             if next == end + 1 {
                 end = next;
             } else {
+                self.next_start = next;
                 break;
             }
         }
-        Some(start..end + 1)
+
+        if start != self.next_start {
+            Some(start..end + 1)
+        } else {
+            None // no iteration was made → end of iterator
+        }
     }
 }
 
 struct Groups32<I: Iterator<Item = u16>> {
     iter: I,
+    next_start: u16,
 }
 
 impl<I: Iterator<Item = u16>> Groups32<I> {
-    fn new(iter: I) -> Self {
-        Self { iter }
+    fn new(mut iter: I) -> Option<Self> {
+        let next_start = iter.next()?;
+        Some(Self { iter, next_start })
     }
 }
 
@@ -154,16 +165,23 @@ impl<I: Iterator<Item = u16>> Iterator for Groups32<I> {
     type Item = std::ops::Range<u16>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let start = self.iter.next()?;
+        let start = self.next_start;
         let mut end = start;
+
         for next in self.iter.by_ref() {
             if next == end + 2 {
                 end = next;
             } else {
+                self.next_start = next;
                 break;
             }
         }
-        Some(start..end + 2)
+
+        if start != self.next_start {
+            Some(start..end + 2)
+        } else {
+            None // no iteration was made → end of iterator
+        }
     }
 }
 
