@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::fmt::Display;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use strum::IntoEnumIterator;
 use strum_macros::{EnumIter, FromRepr};
 use tokio::time::sleep;
@@ -70,31 +70,19 @@ async fn main() -> Result<(), Error> {
     channel.enable().await?;
 
     if std::env::args().find(|v| v == "db").is_some() {
-        debug!("Making snapshot to store to DB");
-        let cli = connect_db().await?;
-
-        let pv_pow = Reg32::AccumulatedPvPower.read(&mut channel).await?;
-        info!("{pv_pow}");
-        let load_pow = Reg32::AccumulatedLoadPower.read(&mut channel).await?;
-        info!("{load_pow}");
-
-        let sql = format!(
-            "INSERT INTO accumulated_power (pv, load) VALUES ({}, {})",
-            pv_pow.val(),
-            load_pow.val()
-        );
-        let count = cli.simple_query(&sql).await?.len();
-        if count == 1 {
-            debug!("Snapshot stored to DB");
-        } else {
-            warn!("Unexpected statement result: {count}");
-        }
-        return Ok(());
+        snapshot_acc(&connect_db().await?, &mut channel).await?;
     } else if std::env::args().find(|v| v == "load").is_some() {
-        return snapshot_load(&mut channel).await;
+        return snapshot_load(&connect_db().await?, &mut channel).await;
     } else if std::env::args().find(|v| v == "track").is_some() {
+        let cli = connect_db().await?;
+        let mut last_acc = SystemTime::UNIX_EPOCH;
         loop {
-            snapshot_load(&mut channel).await?;
+            if last_acc.elapsed().unwrap() >= Duration::from_secs(60 * 15) {
+                snapshot_acc(&cli, &mut channel).await?;
+                last_acc = SystemTime::now();
+            }
+
+            snapshot_load(&cli, &mut channel).await?;
             sleep(Duration::from_secs(5)).await;
         }
     }
@@ -170,29 +158,57 @@ async fn connect_db() -> Result<tokio_postgres::Client, tokio_postgres::Error> {
     Ok(cli)
 }
 
-async fn snapshot_load(channel: &mut Channel) -> Result<(), Error> {
-    debug!("Making load snapshot to store to DB");
-    let cli = connect_db().await?;
+async fn snapshot_acc(cli: &tokio_postgres::Client, channel: &mut Channel) -> Result<(), Error> {
+    debug!("Making snapshot to store to DB");
 
-    let mut regs_to_read = [
+    let pv_pow = Reg32::AccumulatedPvPower.read(channel).await?;
+    info!("{pv_pow}");
+    let load_pow = Reg32::AccumulatedLoadPower.read(channel).await?;
+    info!("{load_pow}");
+
+    let sql = format!(
+        "INSERT INTO accumulated_power (pv, load) VALUES ({}, {})",
+        pv_pow.val(),
+        load_pow.val()
+    );
+    let count = cli.simple_query(&sql).await?.len();
+    if count == 1 {
+        debug!("Snapshot stored to DB");
+    } else {
+        warn!("Unexpected statement result: {count}");
+    }
+    Ok(())
+}
+
+async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> Result<(), Error> {
+    debug!("Making load snapshot to store to DB");
+
+    let regs_to_read = [
         Reg16::PvVoltage,
         Reg16::PvChargerCurrent,
         Reg16::PvChargerPower,
+
         Reg16::BatteryVoltage,
         Reg16::BatteryCurrent,
         Reg16::BatteryPower,
         Reg16::LoadCurrent,
         Reg16::PInverter,
         Reg16::SInverter,
-    ]
-        .to_vec();
-    regs_to_read.sort_by(|&a, &b| (a as u16).cmp(&(b as u16)));
-    let mut results = Vec::with_capacity(regs_to_read.len());
+    ];
+    // Hardcode to make only two requests to controller to save time.
+    let range1 = Reg16::PvVoltage as u16..(Reg16::PvChargerPower as u16 + 1);
+    let range2 = Reg16::BatteryVoltage as u16..(Reg16::SInverter as u16 + 1);
+
+    // Check that we've made no mistake
+    assert_eq!(range1.len() + range2.len(), regs_to_read.len());
+    for reg in regs_to_read {
+        assert!(range1.contains(&(reg as u16)) || range2.contains(&(reg as u16)));
+    }
+
+    let mut results = Vec::with_capacity(range1.len() + range2.len());
 
     debug!("reading regs");
-    let iter = Groups16::new(regs_to_read.into_iter().map(|v| v as u16))
-        .expect("regs_to_read is not empty");
-    for grp in iter {
+    for grp in [range1, range2] {
         debug!("{:?}", &grp);
         let result = read_many(grp.clone(), channel).await;
         match result {
