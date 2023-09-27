@@ -187,7 +187,6 @@ async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
         Reg16::PvVoltage,
         Reg16::PvChargerCurrent,
         Reg16::PvChargerPower,
-
         Reg16::BatteryVoltage,
         Reg16::BatteryCurrent,
         Reg16::BatteryPower,
@@ -217,8 +216,7 @@ async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
                     let addr = grp.start + index as u16;
                     results.push(Reg16Val {
                         val,
-                        var: Reg16::from_repr(addr)
-                            .expect("range was created from valid values"),
+                        var: Reg16::from_repr(addr).expect("range was created from valid values"),
                     });
                 }
             }
@@ -228,13 +226,26 @@ async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
 
     macro_rules! find {
         ($var:ident, f01) => {
-            results.iter().find(|v| v.var == Reg16::$var).map(|v| f32::from(v.val)).unwrap() / 10.0
+            results
+                .iter()
+                .find(|v| v.var == Reg16::$var)
+                .map(|v| f32::from(v.val))
+                .unwrap()
+                / 10.0
         };
         ($var:ident) => {
-            results.iter().find(|v| v.var == Reg16::$var).map(|v| v.val).unwrap()
+            results
+                .iter()
+                .find(|v| v.var == Reg16::$var)
+                .map(|v| v.val)
+                .unwrap()
         };
         ($var:ident, -ival) => {
-            results.iter().find(|v| v.var == Reg16::$var).map(|v| -(v.val as i16)).unwrap()
+            results
+                .iter()
+                .find(|v| v.var == Reg16::$var)
+                .map(|v| -(v.val as i16))
+                .unwrap()
         };
     }
 
