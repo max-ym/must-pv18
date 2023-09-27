@@ -69,11 +69,11 @@ async fn main() -> Result<(), Error> {
     );
     channel.enable().await?;
 
-    if std::env::args().find(|v| v == "db").is_some() {
+    if std::env::args().any(|v| v == "db") {
         snapshot_acc(&connect_db().await?, &mut channel).await?;
-    } else if std::env::args().find(|v| v == "load").is_some() {
+    } else if std::env::args().any(|v| v == "load") {
         return snapshot_load(&connect_db().await?, &mut channel).await;
-    } else if std::env::args().find(|v| v == "track").is_some() {
+    } else if std::env::args().any(|v| v == "track") {
         let cli = connect_db().await?;
         let mut last_acc = SystemTime::UNIX_EPOCH;
         loop {
