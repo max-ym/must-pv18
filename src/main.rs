@@ -30,7 +30,7 @@ async fn main() -> Result<(), Error> {
                 message
             ))
         })
-        .level(LevelFilter::Info)
+        .level(LevelFilter::Debug)
         .chain(std::io::stdout())
         .apply()
         .unwrap();
@@ -69,33 +69,9 @@ async fn main() -> Result<(), Error> {
     );
     channel.enable().await?;
 
-    if std::env::args().find(|v| v == "--db").is_some() {
+    if std::env::args().find(|v| v == "db").is_some() {
         debug!("Making snapshot to store to DB");
-
-        let tls = native_tls::TlsConnector::builder()
-            .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .expect("check the parameters above, those should pass!");
-        let tls = postgres_native_tls::MakeTlsConnector::new(tls);
-
-        let (cli, conn) = tokio_postgres::Config::new()
-            .user("must_solar")
-            .password("must_solar")
-            .host("localhost")
-            .port(5432)
-            .dbname("must_solar")
-            .connect_timeout(Duration::from_secs(5))
-            .connect(tls)
-            .await?;
-
-        // The connection object performs the actual communication with the database,
-        // so spawn it off to run on its own.
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                error!("connection error: {e}");
-            }
-        });
+        let cli = connect_db().await?;
 
         let pv_pow = Reg32::AccumulatedPvPower.read(&mut channel).await?;
         info!("{pv_pow}");
@@ -104,7 +80,8 @@ async fn main() -> Result<(), Error> {
 
         let sql = format!(
             "INSERT INTO accumulated_power (pv, load) VALUES ({}, {})",
-            pv_pow.val(), load_pow.val()
+            pv_pow.val(),
+            load_pow.val()
         );
         let count = cli.simple_query(&sql).await?.len();
         if count == 1 {
@@ -113,6 +90,13 @@ async fn main() -> Result<(), Error> {
             warn!("Unexpected statement result: {count}");
         }
         return Ok(());
+    } else if std::env::args().find(|v| v == "load").is_some() {
+        return snapshot_load(&mut channel).await;
+    } else if std::env::args().find(|v| v == "track").is_some() {
+        loop {
+            snapshot_load(&mut channel).await?;
+            sleep(Duration::from_secs(5)).await;
+        }
     }
 
     for group in Groups16::new(Reg16::iter().map(|v| v as u16)).expect("Reg16 enum is not empty") {
@@ -157,6 +141,107 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
+async fn connect_db() -> Result<tokio_postgres::Client, tokio_postgres::Error> {
+    let tls = native_tls::TlsConnector::builder()
+        .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("check the parameters above, those should pass!");
+    let tls = postgres_native_tls::MakeTlsConnector::new(tls);
+
+    let (cli, conn) = tokio_postgres::Config::new()
+        .user("must_solar")
+        .password("must_solar")
+        .host("localhost")
+        .port(5432)
+        .dbname("must_solar")
+        .connect_timeout(Duration::from_secs(5))
+        .connect(tls)
+        .await?;
+
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            error!("connection error: {e}");
+        }
+    });
+
+    Ok(cli)
+}
+
+async fn snapshot_load(channel: &mut Channel) -> Result<(), Error> {
+    debug!("Making load snapshot to store to DB");
+    let cli = connect_db().await?;
+
+    let mut regs_to_read = [
+        Reg16::PvVoltage,
+        Reg16::PvChargerCurrent,
+        Reg16::PvChargerPower,
+        Reg16::BatteryVoltage,
+        Reg16::BatteryCurrent,
+        Reg16::BatteryPower,
+        Reg16::LoadCurrent,
+        Reg16::PInverter,
+        Reg16::SInverter,
+    ]
+        .to_vec();
+    regs_to_read.sort_by(|&a, &b| (a as u16).cmp(&(b as u16)));
+    let mut results = Vec::with_capacity(regs_to_read.len());
+
+    debug!("reading regs");
+    let iter = Groups16::new(regs_to_read.into_iter().map(|v| v as u16))
+        .expect("regs_to_read is not empty");
+    for grp in iter {
+        debug!("{:?}", &grp);
+        let result = read_many(grp.clone(), channel).await;
+        match result {
+            Ok(val) => {
+                for (index, val) in val.into_iter().enumerate() {
+                    let addr = grp.start + index as u16;
+                    results.push(Reg16Val {
+                        val,
+                        var: Reg16::from_repr(addr)
+                            .expect("range was created from valid values"),
+                    });
+                }
+            }
+            Err(e) => println!("Error reading {:?}: {}", grp, e),
+        }
+    }
+
+    macro_rules! find {
+        ($var:ident, f01) => {
+            results.iter().find(|v| v.var == Reg16::$var).map(|v| f32::from(v.val)).unwrap() / 10.0
+        };
+        ($var:ident) => {
+            results.iter().find(|v| v.var == Reg16::$var).map(|v| v.val).unwrap()
+        };
+        ($var:ident, -ival) => {
+            results.iter().find(|v| v.var == Reg16::$var).map(|v| -(v.val as i16)).unwrap()
+        };
+    }
+
+    debug!("Preparing SQL");
+    let sql = format!(
+        "INSERT INTO current_load (pv_voltage, pv_charger_current, pv_charger_power, battery_voltage, battery_current, battery_power, load_current, p_inverter, s_inverter) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {})",
+        find!(PvVoltage, f01),
+        find!(PvChargerCurrent, f01),
+        find!(PvChargerPower),
+        find!(BatteryVoltage, f01),
+        find!(BatteryCurrent, -ival),
+        find!(BatteryPower, -ival),
+        find!(LoadCurrent, f01),
+        find!(PInverter),
+        find!(SInverter),
+    );
+    debug!("{sql}");
+    cli.simple_query(&sql).await?;
+
+    debug!("Stored load snapshot to DB");
+    Ok(())
+}
+
 struct Groups16<I: Iterator<Item = u16>> {
     iter: I,
     next_start: u16,
@@ -176,7 +261,9 @@ impl<I: Iterator<Item = u16>> Iterator for Groups16<I> {
         let start = self.next_start;
         let mut end = start;
 
+        let mut executed = false;
         for next in self.iter.by_ref() {
+            executed = true;
             if next == end + 1 {
                 end = next;
             } else {
@@ -185,7 +272,7 @@ impl<I: Iterator<Item = u16>> Iterator for Groups16<I> {
             }
         }
 
-        if start != self.next_start {
+        if executed {
             Some(start..end + 1)
         } else {
             None // no iteration was made → end of iterator
@@ -212,7 +299,10 @@ impl<I: Iterator<Item = u16>> Iterator for Groups32<I> {
         let start = self.next_start;
         let mut end = start;
 
+        let mut executed = false;
         for next in self.iter.by_ref() {
+            executed = true;
+
             if next == end + 2 {
                 end = next;
             } else {
@@ -221,7 +311,7 @@ impl<I: Iterator<Item = u16>> Iterator for Groups32<I> {
             }
         }
 
-        if start != self.next_start {
+        if executed {
             Some(start..end + 2)
         } else {
             None // no iteration was made → end of iterator
@@ -229,7 +319,7 @@ impl<I: Iterator<Item = u16>> Iterator for Groups32<I> {
     }
 }
 
-#[derive(Debug, Clone, Copy, EnumIter, FromRepr)]
+#[derive(Debug, Clone, Copy, EnumIter, FromRepr, PartialEq, Eq)]
 #[repr(u16)]
 enum Reg16 {
     MachineType = 10001,
@@ -471,7 +561,7 @@ impl Display for Reg16Val {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use Reg16::*;
         let fval = f32::from(self.val);
-        let ival = self.val as i32;
+        let ival = self.val as i16;
         let f01 = fval / 10.0;
         let f001 = fval / 100.0;
 
@@ -552,8 +642,8 @@ impl Display for Reg16Val {
             WarningMessage2 => write!(f, "Warning Message 2: {}", self.val),
             HardwareVersion => write!(f, "Hardware Version: {}", self.val),
             SoftwareVersion => write!(f, "Software Version: {}", self.val),
-            BatteryPower => write!(f, "Battery Power: {} W", self.val),
-            BatteryCurrent => write!(f, "Battery Current: {} A", self.val),
+            BatteryPower => write!(f, "Battery Power: {} W", ival),
+            BatteryCurrent => write!(f, "Battery Current: {} A", ival),
             BatteryVoltageGrade => write!(f, "Battery Voltage Grade: {} V", self.val),
             RatedPowerW => write!(f, "Rated Power (W): {} W", self.val),
         }
