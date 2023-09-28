@@ -85,6 +85,19 @@ async fn main() -> Result<(), Error> {
             snapshot_load(&cli, &mut channel).await?;
             sleep(Duration::from_secs(2)).await;
         }
+    } else if std::env::args().any(|v| v == "track_with_grid") {
+        let cli = connect_db().await?;
+        let mut last_acc = SystemTime::UNIX_EPOCH;
+        loop {
+            if last_acc.elapsed().unwrap() >= Duration::from_secs(60 * 15) {
+                snapshot_acc(&cli, &mut channel).await?;
+                last_acc = SystemTime::now();
+            }
+
+            snapshot_grid(&connect_db().await?, &mut channel).await?;
+            snapshot_load(&cli, &mut channel).await?;
+            sleep(Duration::from_secs(5)).await;
+        }
     }
 
     for group in Groups16::new(Reg16::iter().map(|v| v as u16)).expect("Reg16 enum is not empty") {
@@ -180,6 +193,27 @@ async fn snapshot_acc(cli: &tokio_postgres::Client, channel: &mut Channel) -> Re
     Ok(())
 }
 
+async fn snapshot_grid(cli: &tokio_postgres::Client, channel: &mut Channel) -> Result<(), Error> {
+    debug!("Making grid snapshot to store to DB");
+
+    let grid_voltage = Reg16::GridVoltage.read(channel).await?;
+    let grid_freq = Reg16::GridFrequency.read(channel).await?;
+
+    let sql = format!(
+        "INSERT INTO grid_stat (voltage, frequency) VALUES ({}, {})",
+        f32::from(grid_voltage.val) / 10.0,
+        f32::from(grid_freq.val) / 100.0
+    );
+    let count = cli.simple_query(&sql).await?.len();
+    if count == 1 {
+        debug!("Grid snapshot stored to DB");
+    } else {
+        warn!("Unexpected insert count: {count}");
+    }
+
+    Ok(())
+}
+
 async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> Result<(), Error> {
     debug!("Making load snapshot to store to DB");
 
@@ -188,11 +222,9 @@ async fn snapshot_load(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
         Reg16::PvBatteryVoltage,
         Reg16::PvChargerCurrent,
         Reg16::PvChargerPower,
-
         Reg16::LoadCurrent,
         Reg16::PInverter,
         Reg16::SInverter,
-
         Reg16::BatteryPower,
         Reg16::BatteryCurrent,
     ];
