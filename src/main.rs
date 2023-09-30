@@ -200,7 +200,7 @@ async fn snapshot_grid(cli: &tokio_postgres::Client, channel: &mut Channel) -> R
     let grid_freq = Reg16::GridFrequency.read(channel).await?;
 
     let sql = format!(
-        "INSERT INTO grid_stat (voltage, frequency) VALUES ({}, {})",
+        "INSERT INTO grid_stat (voltage, freq) VALUES ({}, {})",
         f32::from(grid_voltage.val) / 10.0,
         f32::from(grid_freq.val) / 100.0
     );
