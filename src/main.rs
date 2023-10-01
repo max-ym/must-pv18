@@ -6,17 +6,14 @@ use strum_macros::{EnumIter, FromRepr};
 use tokio::time::sleep;
 
 use log::*;
-use rodbus::client::{Channel, RequestParam};
-use rodbus::{
-    AddressRange, DataBits, DecodeLevel, FlowControl, Parity, RequestError, RetryStrategy,
-    SerialSettings, StopBits, UnitId,
-};
+use rodbus::client::{Channel, RequestParam, WriteMultiple};
+use rodbus::{AddressRange, DataBits, DecodeLevel, FlowControl, Parity, RequestError, RetryStrategy, SerialSettings, StopBits, UnitId};
 
 const BAUD: u32 = 19200;
 const PATH: &str = "/dev/ttyUSB0";
 const SLAVE: UnitId = UnitId { value: 4 };
 const TIMEOUT: Duration = Duration::from_millis(200);
-const AFTER_READ_HALT: Duration = Duration::from_millis((512.0 / BAUD as f32 * 1000.0) as u64);
+const AFTER_IO_HALT: Duration = Duration::from_millis((512.0 / BAUD as f32 * 1000.0) as u64);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -34,7 +31,7 @@ async fn main() -> Result<(), Error> {
         .chain(std::io::stdout())
         .apply()
         .unwrap();
-    debug!("AFTER_READ_HALT {} ms", AFTER_READ_HALT.as_millis());
+    debug!("AFTER_READ_HALT {} ms", AFTER_IO_HALT.as_millis());
 
     struct MyRetryStrategy;
     impl RetryStrategy for MyRetryStrategy {
@@ -98,6 +95,15 @@ async fn main() -> Result<(), Error> {
             snapshot_load(&cli, &mut channel).await?;
             sleep(Duration::from_secs(5)).await;
         }
+    } else if std::env::args().any(|v| v == "volt_cal_coef") {
+        let val = Reg16::BatteryVoltageCalibrationCoef.read(&mut channel).await?;
+        println!("{val}");
+        let new_val: i16 = 16384 - 120;
+        Reg16::BatteryVoltageCalibrationCoef.write(new_val as u16, &mut channel).await?;
+        sleep(Duration::from_secs(1)).await;
+        let val = Reg16::BatteryVoltageCalibrationCoef.read(&mut channel).await?;
+        println!("New {val}");
+        return Ok(());
     }
 
     for group in Groups16::new(Reg16::iter().map(|v| v as u16)).expect("Reg16 enum is not empty") {
@@ -394,6 +400,8 @@ impl<I: Iterator<Item = u16>> Iterator for Groups32<I> {
 enum Reg16 {
     MachineType = 10001,
 
+    // PvBatteryVoltageCalibrationCoef = 10007,
+
     ChargerWorkstate = 15201,
     MpptState = 15202,
     ChargingState = 15203,
@@ -415,6 +423,8 @@ enum Reg16 {
     PvAccumulatedDay = 15219,
     PvAccumulatedHour = 15220,
     PvAccumulatedMinute = 15221,
+
+    BatteryVoltageCalibrationCoef = 20009,
 
     AcVoltageGrade = 25202,
     RatedPowerVa = 25203,
@@ -655,6 +665,7 @@ impl Display for Reg16Val {
                 "Charging State: {}",
                 crate::ChargingState::from(self.val)
             ),
+            // PvBatteryVoltageCalibrationCoef => write!(f, "PV Battery Voltage Calibration Coefficient: {}", ival),
             PvVoltage => write!(f, "PV Voltage: {} V", f01),
             PvBatteryVoltage => write!(f, "PV Battery Voltage: {} V", f01),
             PvChargerCurrent => write!(f, "PV Charger Current: {} A", f01),
@@ -670,6 +681,8 @@ impl Display for Reg16Val {
             PvAccumulatedDay => write!(f, "PV Accumulated Day: {}", self.val),
             PvAccumulatedHour => write!(f, "PV Accumulated Hour: {}", self.val),
             PvAccumulatedMinute => write!(f, "PV Accumulated Minute: {}", self.val),
+
+            BatteryVoltageCalibrationCoef => write!(f, "Battery Voltage Calibration Coefficient: {}", ival),
 
             AcVoltageGrade => write!(f, "AC Voltage Grade: {} V", self.val),
             RatedPowerVa => write!(f, "Rated Power (VA): {} VA", self.val),
@@ -778,6 +791,20 @@ impl SerialRead for Reg16 {
 }
 
 #[async_trait]
+trait SerialWrite {
+    async fn write(&self, val: u16, channel: &mut Channel) -> Result<(), Error>;
+}
+
+#[async_trait]
+impl SerialWrite for Reg16 {
+    async fn write(&self, val: u16, channel: &mut Channel) -> Result<(), Error> {
+        let addr = *self as u16;
+        reg_write(addr, val, channel).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl SerialRead for Reg32 {
     type Item = Reg32Val;
 
@@ -816,7 +843,7 @@ async fn read_many(
 
     let elapsed = now.elapsed();
     debug!("Read {:?}: {} ms", addr, elapsed.as_millis());
-    sleep(AFTER_READ_HALT).await; // needed to prevent errors on too fast reads
+    sleep(AFTER_IO_HALT).await; // needed to prevent errors on too fast reads
 
     Ok(val)
 }
@@ -840,9 +867,29 @@ async fn ctx_read(addr: u16, channel: &mut Channel) -> Result<u16, RequestError>
 
     let elapsed = now.elapsed();
     debug!("Read {}: {} ms", addr, elapsed.as_millis());
-    sleep(AFTER_READ_HALT).await; // needed to prevent errors on too fast reads
+    sleep(AFTER_IO_HALT).await; // needed to prevent errors on too fast IO
 
     Ok(val)
+}
+
+async fn reg_write(addr: u16, val: u16, channel: &mut Channel) -> Result<(), RequestError> {
+    let now = std::time::Instant::now();
+
+    channel
+        .write_multiple_registers(
+            RequestParam {
+                id: SLAVE,
+                response_timeout: TIMEOUT,
+            },
+            WriteMultiple::from(addr, vec![val]).unwrap(),
+        )
+        .await?;
+
+    let elapsed = now.elapsed();
+    debug!("Write {}: {} ms", addr, elapsed.as_millis());
+    sleep(AFTER_IO_HALT).await; // needed to prevent errors on too fast IO
+
+    Ok(())
 }
 
 #[cfg(test)]
