@@ -98,7 +98,7 @@ async fn main() -> Result<(), Error> {
     } else if std::env::args().any(|v| v == "volt_cal_coef") {
         let val = Reg16::BatteryVoltageCalibrationCoef.read(&mut channel).await?;
         println!("{val}");
-        let new_val: i16 = 16384 - 120;
+        let new_val: i16 = 16384 - 200;
         Reg16::BatteryVoltageCalibrationCoef.write(new_val as u16, &mut channel).await?;
         sleep(Duration::from_secs(1)).await;
         let val = Reg16::BatteryVoltageCalibrationCoef.read(&mut channel).await?;
