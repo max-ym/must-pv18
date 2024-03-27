@@ -95,7 +95,7 @@ async fn main() -> Result<(), Error> {
     if let Some(overnight_duration) = overnight_charging {
         let start = chrono::Local::now()
             .date_naive()
-            .and_hms_opt(1, 18, 0)
+            .and_hms_opt(3, 14, 15)
             .unwrap();
         info!("Overnight charging will start at {}", start);
         let start_utc = start.and_local_timezone(chrono::Local).unwrap().into();
