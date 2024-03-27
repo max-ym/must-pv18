@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::fmt::Display;
 use std::time::{Duration, SystemTime};
 use strum::IntoEnumIterator;
@@ -7,13 +8,26 @@ use tokio::time::sleep;
 
 use log::*;
 use rodbus::client::{Channel, RequestParam, WriteMultiple};
-use rodbus::{AddressRange, DataBits, DecodeLevel, FlowControl, Parity, RequestError, RetryStrategy, SerialSettings, StopBits, UnitId};
+use rodbus::{
+    AddressRange, DataBits, DecodeLevel, FlowControl, Parity, RequestError, RetryStrategy,
+    SerialSettings, StopBits, UnitId,
+};
 
 const BAUD: u32 = 19200;
 const PATH: &str = "/dev/ttyUSB0";
 const SLAVE: UnitId = UnitId { value: 4 };
 const TIMEOUT: Duration = Duration::from_millis(200);
 const AFTER_IO_HALT: Duration = Duration::from_millis((512.0 / BAUD as f32 * 1000.0) as u64);
+
+static mut OVERNIGHT_CHARGING_START: DateTime<Utc> = DateTime::<Utc>::MIN_UTC;
+static mut OVERNIGHT_CHARGING_END: DateTime<Utc> = DateTime::<Utc>::MIN_UTC;
+
+fn is_overnight_charging_init() -> bool {
+    let start = unsafe { OVERNIGHT_CHARGING_START };
+    let end = unsafe { OVERNIGHT_CHARGING_END };
+
+    start != end
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -66,6 +80,33 @@ async fn main() -> Result<(), Error> {
     );
     channel.enable().await?;
 
+    // Setup overnight charging timer.
+    // It will enable charging at 3 AM and disable after specified time.
+    let overnight_charging = std::env::args().position(|v| v == "overnight_charging");
+    let overnight_charging = overnight_charging.map(|pos| {
+        let mut args = std::env::args().skip(pos + 1);
+        let duration_minutes = args
+            .next()
+            .expect("overnight charge duration is not provided")
+            .parse::<u32>()
+            .expect("overnight charge duration is not a number");
+        Duration::from_secs(duration_minutes as u64 * 60)
+    });
+    if let Some(overnight_duration) = overnight_charging {
+        let start = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(1, 18, 0)
+            .unwrap();
+        info!("Overnight charging will start at {}", start);
+        let start_utc = start.and_local_timezone(chrono::Local).unwrap().into();
+        unsafe { OVERNIGHT_CHARGING_START = start_utc };
+
+        let end = start + overnight_duration;
+        info!("Overnight charging will end at {}", end);
+        let end_utc = end.and_local_timezone(chrono::Local).unwrap().into();
+        unsafe { OVERNIGHT_CHARGING_END = end_utc };
+    }
+
     if std::env::args().any(|v| v == "db") {
         return snapshot_acc(&connect_db().await?, &mut channel).await;
     } else if std::env::args().any(|v| v == "load") {
@@ -80,6 +121,7 @@ async fn main() -> Result<(), Error> {
             }
 
             snapshot_load(&cli, &mut channel).await?;
+            charger_update(&mut channel).await;
             sleep(Duration::from_secs(2)).await;
         }
     } else if std::env::args().any(|v| v == "track_with_grid") {
@@ -93,15 +135,22 @@ async fn main() -> Result<(), Error> {
 
             snapshot_grid(&connect_db().await?, &mut channel).await?;
             snapshot_load(&cli, &mut channel).await?;
+            charger_update(&mut channel).await;
             sleep(Duration::from_secs(5)).await;
         }
     } else if std::env::args().any(|v| v == "volt_cal_coef") {
-        let val = Reg16::BatteryVoltageCalibrationCoef.read(&mut channel).await?;
+        let val = Reg16::BatteryVoltageCalibrationCoef
+            .read(&mut channel)
+            .await?;
         println!("{val}");
         let new_val: i16 = 16384 - 200;
-        Reg16::BatteryVoltageCalibrationCoef.write(new_val as u16, &mut channel).await?;
+        Reg16::BatteryVoltageCalibrationCoef
+            .write(new_val as u16, &mut channel)
+            .await?;
         sleep(Duration::from_secs(1)).await;
-        let val = Reg16::BatteryVoltageCalibrationCoef.read(&mut channel).await?;
+        let val = Reg16::BatteryVoltageCalibrationCoef
+            .read(&mut channel)
+            .await?;
         println!("New {val}");
         return Ok(());
     }
@@ -146,6 +195,35 @@ async fn main() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+// Update charger state according to OVERNIGHT_CHARGING_END
+async fn charger_update(channel: &mut Channel) {
+    use ChargerSourcePriority::*;
+
+    if !is_overnight_charging_init() {
+        return;
+    }
+
+    let start = unsafe { OVERNIGHT_CHARGING_START };
+    let end = unsafe { OVERNIGHT_CHARGING_END };
+    let now = chrono::Local::now();
+
+    let charger_source_priority = Reg16::ChargetSourcePriority.read(channel).await.unwrap();
+    debug!("Current charger source priority: {charger_source_priority}");
+    let expected_source_priority = if now < start || now > end {
+        OnlySolar
+    } else {
+        SolarOrElseGrid
+    };
+    debug!("Expected charger source priority: {expected_source_priority}");
+
+    if charger_source_priority.val != expected_source_priority.into_value16() {
+        Reg16::ChargetSourcePriority
+            .write(expected_source_priority, channel)
+            .await
+            .unwrap();
+    }
 }
 
 async fn connect_db() -> Result<tokio_postgres::Client, tokio_postgres::Error> {
@@ -401,7 +479,6 @@ enum Reg16 {
     MachineType = 10001,
 
     // PvBatteryVoltageCalibrationCoef = 10007,
-
     ChargerWorkstate = 15201,
     MpptState = 15202,
     ChargingState = 15203,
@@ -425,6 +502,8 @@ enum Reg16 {
     PvAccumulatedMinute = 15221,
 
     BatteryVoltageCalibrationCoef = 20009,
+
+    ChargetSourcePriority = 20143,
 
     AcVoltageGrade = 25202,
     RatedPowerVa = 25203,
@@ -637,6 +716,44 @@ impl Display for ChargingState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ChargerSourcePriority {
+    SolarOrElseGrid,
+    SolarAndGrid,
+    OnlySolar,
+}
+
+impl IntoValue16 for ChargerSourcePriority {
+    fn into_value16(self) -> u16 {
+        match self {
+            ChargerSourcePriority::SolarOrElseGrid => 0,
+            ChargerSourcePriority::SolarAndGrid => 2,
+            ChargerSourcePriority::OnlySolar => 3,
+        }
+    }
+}
+
+impl From<u16> for ChargerSourcePriority {
+    fn from(val: u16) -> Self {
+        match val {
+            0 => ChargerSourcePriority::SolarOrElseGrid,
+            2 => ChargerSourcePriority::SolarAndGrid,
+            3 => ChargerSourcePriority::OnlySolar,
+            _ => unreachable!("Invalid charger source priority: {val}"),
+        }
+    }
+}
+
+impl Display for ChargerSourcePriority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChargerSourcePriority::SolarOrElseGrid => write!(f, "Solar when available, else Grid"),
+            ChargerSourcePriority::SolarAndGrid => write!(f, "Solar and Grid"),
+            ChargerSourcePriority::OnlySolar => write!(f, "Only Solar"),
+        }
+    }
+}
+
 impl Display for Reg16Val {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use Reg16::*;
@@ -682,7 +799,15 @@ impl Display for Reg16Val {
             PvAccumulatedHour => write!(f, "PV Accumulated Hour: {}", self.val),
             PvAccumulatedMinute => write!(f, "PV Accumulated Minute: {}", self.val),
 
-            BatteryVoltageCalibrationCoef => write!(f, "Battery Voltage Calibration Coefficient: {}", ival),
+            BatteryVoltageCalibrationCoef => {
+                write!(f, "Battery Voltage Calibration Coefficient: {}", ival)
+            }
+
+            ChargetSourcePriority => write!(
+                f,
+                "Charger Source: {}",
+                crate::ChargerSourcePriority::from(self.val)
+            ),
 
             AcVoltageGrade => write!(f, "AC Voltage Grade: {} V", self.val),
             RatedPowerVa => write!(f, "Rated Power (VA): {} VA", self.val),
@@ -792,14 +917,24 @@ impl SerialRead for Reg16 {
 
 #[async_trait]
 trait SerialWrite {
-    async fn write(&self, val: u16, channel: &mut Channel) -> Result<(), Error>;
+    async fn write(&self, val: impl IntoValue16, channel: &mut Channel) -> Result<(), Error>;
+}
+
+trait IntoValue16: Send {
+    fn into_value16(self) -> u16;
+}
+
+impl IntoValue16 for u16 {
+    fn into_value16(self) -> u16 {
+        self
+    }
 }
 
 #[async_trait]
 impl SerialWrite for Reg16 {
-    async fn write(&self, val: u16, channel: &mut Channel) -> Result<(), Error> {
+    async fn write(&self, val: impl IntoValue16, channel: &mut Channel) -> Result<(), Error> {
         let addr = *self as u16;
-        reg_write(addr, val, channel).await?;
+        reg_write(addr, val.into_value16(), channel).await?;
         Ok(())
     }
 }
